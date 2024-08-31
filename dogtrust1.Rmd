@@ -1,0 +1,511 @@
+---
+title: "dogtrust1.1"
+output: html_document
+date: "2024-08-14"
+---
+
+```{r}
+library(readxl)
+library(tidyr)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(parsedate)
+library(ROSE)
+library(car)
+library(performanceEstimation)
+library(imbalance)
+library(stringr)
+library(cobalt)
+library(stringr)
+library(stargazer)
+library(xtable)
+options(scipen=999)
+
+#source the function 
+source("C:/Users/emv06/Desktop/ds/dissertation/function.R")
+```
+
+
+```{r}
+#import data 
+RTK = read.csv("C:/Users/emv06/Desktop/ds/dissertation/RTK_data.csv", header = TRUE, na.strings=c(""))
+PAS = read.csv("C:/Users/emv06/Desktop/ds/dissertation/PAS_data.csv", header = TRUE, na.strings=c(""))
+alldata = read.csv("C:/Users/emv06/Desktop/ds/dissertation/alladoption.csv", header = TRUE, na.strings=c(""))
+```
+
+
+```{r}
+#####data cleaning#####
+
+##PAS data ##
+PAS1 = as.data.table(PAS)
+
+#reset NA
+PAS1[is.na(ARB_Present), ARB_Present := "None of these signs seen"]
+PAS1[is.na(SRB_DogLeftAlone), SRB_DogLeftAlone := "Not applicable, haven't left him / her alone yet"]
+
+#remove no answer call 
+PAS1 = PAS1[call_success == "Call answered"]
+PAS1 = PAS1[owner_able_to_answer_questions_c == "Yes, they can answer questions now"& dog_still_with_owner_c == "Yes, owner still has the dog"]
+
+#whether theres SRB
+PAS1[SRB_NeverLeft_Details == "None of these signs noticed", SRB_NeverLeft_Details := NA]
+PAS1[SRB_LeftAlone_Details == "None of these signs noticed", SRB_LeftAlone_Details := NA ]
+PAS1[, SRB_present := ifelse(is.na(SRB_NeverLeft_Details)&is.na(SRB_LeftAlone_Details)&is.na(SRB_Details_Other), 0, 1)]
+
+#whether theres ARB
+PAS1[, ARB_Present:=ifelse(ARB_Present == "Yes, at least one of these signs have occurred",1,0)]
+
+#whether theres OB
+PAS1[,OB_exist:=ifelse(grepl("^Yes",OB_Present), 1,0)]
+PAS1[is.na(OB_exist), OB_exist := 0]
+PAS1[OB_exist == 1, OB_help:= ifelse(OB_Present=="Yes, other signs and would like help", 1,0)]
+PAS1[, Ongoing_behaviour_support := ifelse(Ongoing_behaviour_support == "Owner received behaviour support in last 4 days", 1, 0)]
+PAS1[is.na(Ongoing_behaviour_support), Ongoing_behaviour_support :=0]
+PAS1[, Ongoing_support_Any := ifelse(Ongoing_support_Any %in% c("Owner is having support from behaviour team", "Owner is having support from vet and behaviour team"),1,0)]
+PAS1[is.na(Ongoing_support_Any), Ongoing_support_Any:= 0]
+PAS1[is.na(OB_help), OB_help:= 0]
+
+
+#whether support provide 
+PAS1[, support := ifelse(does_the_owner_want_behaviour_advice == "Advice needed - tasked" | 
+                           Ongoing_support_Any == 1|
+                           Ongoing_behaviour_support == 1 | OB_help == 1
+                         , 1, 0)]
+
+#support provided for previous behaviour 
+id = PAS1[SRB_present==0 & ARB_Present==0 & OB_exist== 0 & support ==1 & Call_type == "Post Adoption Call - 2 weeks",registration_id ]
+PAS1[(registration_id %in% id) & Call_type=="Post Adoption Call - 48h", support := 1 ]
+
+#these are people who received support between calls at 2days and 4 months
+id = PAS1[SRB_present==0 & ARB_Present==0 & OB_exist== 0 & support ==1 & Call_type == "Post Adoption Call - 4 months",registration_id ]
+PAS1[(registration_id %in% id) & Call_type=="Post Adoption Call - 2 weeks", support := 1 ]
+
+PAS1$Call_type <- factor(PAS1$Call_type, levels = c("Post Adoption Call - 48h", "Post Adoption Call - 2 weeks", "Post Adoption Call - 4 months"), ordered = TRUE)
+
+
+PAS1[is.na(support), support := 0]
+
+
+PAS1[,`:=`(Call_type = as.factor(Call_type),
+          Rehoming_date = as.Date(parse_date(Rehoming_date)), call_success = as.factor(call_success),
+          dog_still_with_owner_c = as.factor(dog_still_with_owner_c),
+          Ongoing_behaviour_support = as.factor(Ongoing_behaviour_support), 
+          Ongoing_support_Any = as.factor(Ongoing_support_Any), 
+          ARB_Present = as.factor(ARB_Present),
+          SRB_present = as.factor(SRB_present),
+          OB_exist = as.factor(OB_exist), 
+          OB_help = as.factor(OB_help),
+          SRB_DogLeftAlone = as.factor(SRB_DogLeftAlone), 
+          OB_Present = as.factor(OB_Present),
+          support = as.factor(support)
+          )]
+
+PAS1 = unique(PAS1)
+
+
+
+#number of dog returned before call 
+returned = PAS[(dog_still_with_owner_c == "No, owner no longer has dog" & call_success == "Call answered")] #139 
+table(returned$Call_type)#100 owner returned the within 48 hours 
+
+
+##RTK data##
+setDT(RTK)
+RTK1 = as.data.table(RTK)
+
+RTK1$date_of_homing = as.Date(parse_date(RTK$date_of_homing))
+RTK1$date_of_return = as.Date(parse_date(RTK$date_of_return))
+
+#number of dogs not in PAS data 
+RTK[!(registration_id %in% PAS[Call_type == "Post Adoption Call - 48h", registration_id])] 
+
+#find duplicated ID in PAS 
+dup_id = PAS1[, .(count=.N, Call_type), by= c("registration_id", "Call_type")][count > 1]
+RTK[registration_id %in% dup_id[,registration_id]]
+
+#merge two dataset 
+full_table = RTK1[PAS1, on =.(registration_id, date_of_homing == Rehoming_date) ]
+full_table = RTK1[PAS1, on =.(registration_id)]
+full_table[ARB_rfr == "#N/A", ARB_rfr := NA]
+full_table[SRB_rfr == "#N/A", SRB_rfr := NA]
+full_table[OB_rfr == "#N/A", OB_rfr := NA] 
+
+full_table = full_table[, .(registration_id, Call_type, returned = ifelse(is.na(age_at_return), 0,1), date_of_homing, date_of_return, age_at_return, age_at_return, adoption_year, Reason_UB, ARB_rfr = as.factor(ARB_rfr), SRB_rfr = as.factor(SRB_rfr), OB_rfr = as.factor(OB_rfr), ARB_Present, ARB_Details, ARB_Target, SRB_NeverLeft_Details, SRB_LeftAlone_Details, OB_Present,
+               SRB_present, OB_exist, OB_help, support)]
+
+
+
+full_table = full_table%>% 
+  distinct()
+setDT(full_table)
+
+##check dates 
+#RTK1[date_of_homing>date_of_return]
+
+
+```
+
+
+```{r}
+#get type of ARB behaviour 
+
+setDT(full_table)
+
+all_Details <- na.omit(unique(unlist(str_split(c(full_table$ARB_Details), ";"))))
+all_Details <- all_Details[!grepl("^(Other|skip|None)", all_Details)]
+
+for (value in all_Details) {
+  # Use str_detect with regex escaping to handle special characters
+  full_table[, (value) := as.factor(as.integer(str_detect(ARB_Details, fixed(value))))]
+}
+```
+
+
+```{r}
+#convert ARB_target into columns 
+
+all_Target <- na.omit(unique(unlist(str_split(c(full_table$ARB_Target), ";"))))
+all_Target <- all_Target[!grepl("^(Other|skip|None)", all_Target)]
+
+for (value in all_Target) {
+  # Use str_detect with regex escaping to handle special characters
+  full_table[, (value) := as.factor(as.integer(str_detect(ARB_Target, fixed(value))))]
+}
+```
+
+```{r}
+#convert SRB behaviour into columns 
+
+all_values <- na.omit(unique(unlist(str_split(c(full_table$SRB_LeftAlone_Details, full_table$SRB_NeverLeft_Details), ";"))))
+all_values <- all_values[!grepl("^(Other|skip|None)", all_values)]
+
+for (value in all_values) {
+  # Use str_detect with regex escaping to handle special characters
+  full_table[, (value) := as.factor(as.integer(str_detect(SRB_LeftAlone_Details, fixed(value))| str_detect(SRB_NeverLeft_Details, fixed(value))))]
+}
+
+full_table[, (23:67):= lapply(.SD, function(x) replace(x, is.na(x), 0)), .SDcols = (23:67)]
+```
+
+```{r}
+#merge dog data to full table 
+setDT(alldata)
+alldata1 = alldata[, .(registration_id= registration_id,
+              RTK = as.factor(RTK),
+              size= as.factor(size),
+              sex=as.factor(sex), 
+              BMP = as.factor(ifelse(BMP_details == "NA", 0, 1)),
+              kc_group = as.factor(kc_group),
+              age_group = as.factor(age_group), 
+              age_at_homing = age_at_homing_years
+              )]
+
+#combine breed groups 
+final_table = full_table[alldata1, on = c("registration_id")]
+
+
+gc()
+
+#remove missing value 
+final_table = final_table[!is.na(returned)]
+final_table[is.na(Reason_UB) , Reason_UB := 0]
+final_table[RTK==1 & duplicated(registration_id),]
+
+```
+
+
+```{r}
+###propensity matching score 
+library(MatchIt)
+library(cobalt)
+
+##get all the variables for modelling 
+var3 = colnames(final_table)[c(20,22:73)]
+###Modeling all variable RTK
+final_table2 = final_table%>% select(all_of(var3))
+summary(final_table2$BMP)
+set.seed(1)
+m.out = matchit( support ~. - RTK, data = final_table2, distance = "logit"
+                 , method = "nearest", replace = FALSE, caliper = 0.2, ratio = 1)
+
+
+summary(m.out)
+
+#check if balanced 
+bal.tab(m.out, m.threshold=0.1, un = TRUE)
+
+# #plot to see balance 
+# bal.plot(m.out, var.name = "age_group", which = "both")
+# bal.plot(m.out, var.name = "Growling", which = "both")
+# bal.plot(m.out, var.name = "`Towards owner or an adult in the household`", which = "both")
+# 
+
+#get matched data 
+mdata = match.data(m.out) 
+
+#remove distance (from match) columns 
+mdata = mdata[, -((ncol(mdata) - 2):ncol(mdata)), with = FALSE]
+colnames(mdata)
+
+#glm on all variables
+balance.glm = glm(RTK ~. ,data = mdata, family = "binomial")
+summary(balance.glm)
+
+#check significance 
+drop1(balance.glm, test = "LRT")
+
+
+
+#write to latex 
+psm = summary(m.out)
+psm_match = psm$sum.matched[,c(1:3)]
+print(xtable(psm_match, digits = 2), type = "latex", file= "C:/Users/emv06/Desktop/ds/dissertation/sum_psm.tex")
+```
+
+```{r}
+##backward selection 
+best_glm = model.select(balance.glm, keep = c("support"), verbose = T)
+summary(best_glm)
+
+#forward interaction 
+best_int = model.interect(best_glm, 'support', colnames(mdata)[1:47][-2])
+summary(best_int)
+exp(coef(best_int))
+anova(best_int)
+
+
+#CHECK FOR GLM FIT 
+library(ResourceSelection)
+hoslem.test(best_int$y, fitted(best_int), g =10)
+
+modelChi = best_int$deviance  # for chi sq statistic
+chiDF =  nrow(mdata) - length(best_int$coefficients)  # for DF
+1 - pchisq(modelChi, chiDF)
+
+
+##########save result as Latex 
+# Extracting coefficients
+
+coefficients <- balance.glm$coefficients
+var = names(coefficients)
+# Extracting Odds Ratios (OR) and Confidence Intervals (CI)
+OR <- exp(coefficients)
+conf = exp(confint(balance.glm))
+CI_lower = round(conf[,1],2)
+CI_upper = round(conf[,2],2)
+pval = coef(summary(balance.glm))[,4]
+
+
+tbl1 = data.frame(Variable = var,
+                    OR = OR, 
+                    CI =  paste0("(", round(CI_lower, 2), ", ", round(CI_upper, 2), ")"), 
+                    p_value = round(pval,5))
+
+print(xtable(tbl1, digits = 3), type = "latex", file= "C:/Users/emv06/Desktop/ds/dissertation/tbl_orig.tex", include.rownames = FALSE )
+
+#backward select steps
+back = as.data.frame(best_glm[2])
+print(xtable(back, digits = 3), type = "latex", rownames = F, file= "C:/Users/emv06/Desktop/ds/dissertation/backward_rtk.tex", include.rownames = FALSE )
+
+```
+
+
+```{r}
+###ARB_rfr 
+var1 =  c(colnames(final_table)[c(23:31, 69,70,72,73)], "support", "ARB_rfr", "SRB_present", "OB_exist") 
+###Modeling all variable 
+final_table3 = final_table%>% select(all_of(var1))
+setDT(final_table3)
+final_table3[is.na(ARB_rfr), ARB_rfr := as.factor(0)]
+set.seed(1)
+m.out1 = matchit( support ~. - ARB_rfr, data = final_table3, distance = "logit"
+                 , method = "nearest", replace = FALSE, caliper = 0.2, ratio = 1)
+
+#summary(m.out1)
+mdata1 = match.data(m.out1) 
+mdata1 = mdata1[, -((ncol(mdata1) - 2):ncol(mdata1)), with = FALSE]
+#glm on all var
+model_arb = glm(ARB_rfr ~., data = mdata1, family ="binomial" )
+
+#backward select
+model_arb_best = model.select(model_arb)
+
+#forward inter
+model_arb_int = model.interect(model_arb_best, "support", var1[-c(14,15)])
+
+#remove unsignificant after interaction 
+model_arb_best = update(model_arb_int, ".~.-Growling")
+summary(model_arb_best)
+exp(coef(model_arb))
+
+##########save result as Latex 
+# Extracting coefficients
+coefficients <- model_arb$coefficients
+var = names(coefficients)
+# Extracting Odds Ratios (OR) and Confidence Intervals (CI)
+OR <- exp(coefficients)
+conf = exp(confint(model_arb))
+CI_lower = round(conf[,1],2)
+CI_upper = round(conf[,2],2)
+pval = coef(summary(model_arb))[,4]
+
+
+tbl2 = data.frame(Variable = var,
+                    OR = OR, 
+                    CI =  paste0("(", round(CI_lower, 2), ", ", round(CI_upper, 2), ")"), 
+                    p_value = round(pval,5))
+
+print(xtable(tbl2, digits = 3), type = "latex", file= "C:/Users/emv06/Desktop/ds/dissertation/tbl_arb.tex", include.rownames = FALSE )
+
+
+
+
+###SRB_rfr 
+var1 =  c(colnames(final_table)[c(52:67, 69,70,72,73)], "support", "SRB_rfr", "ARB_Present", "OB_exist") 
+###Modeling all variable 
+final_table3 = final_table%>% select(all_of(var1))
+setDT(final_table3)
+final_table3[is.na(SRB_rfr), SRB_rfr := as.factor(0)]
+set.seed(1)
+m.out2 = matchit( support ~. - SRB_rfr, data = final_table3, distance = "logit"
+                 , method = "nearest", replace = FALSE, caliper = 0.2, ratio = 1)
+
+#summary(m.out2)
+mdata2 = match.data(m.out2) 
+mdata2 = mdata2[, -((ncol(mdata2) - 2):ncol(mdata2)), with = FALSE]
+
+#all var
+model_srb = glm(SRB_rfr ~., data = mdata2, family ="binomial" )
+
+#backward select
+model_srb_best = model.select(model_srb)
+
+#forward interaction
+model_srb_int = model.interect(model_srb_best, "support", var1[-c(21,22)])
+model_srb_best = update(model_srb_int)
+
+
+summary(model_srb_best)
+exp(coef(model_srb_best))
+
+summary(model_srb_int)
+exp(coef(model_srb_best))
+
+##########save result as Latex 
+# Extracting coefficients
+coefficients <- model_srb$coefficients
+var = names(coefficients)
+# Extracting Odds Ratios (OR) and Confidence Intervals (CI)
+OR <- exp(coefficients)
+conf = exp(confint(model_srb))
+CI_lower = round(conf[,1],2)
+CI_upper = round(conf[,2],2)
+formatC(CI_upper, format = "e", digits = 2)
+pval = coef(summary(model_srb_int))[,4]
+
+
+tbl3 = data.frame(Variable = var,
+                    OR = OR, 
+                    CI =  paste0("(", round(CI_lower, 2), ", ", round(CI_upper, 2), ")"), 
+                    p_value = round(pval,5))
+
+print(xtable(tbl3, digits = 3), type = "latex", file= "C:/Users/emv06/Desktop/ds/dissertation/tbl_srb_int.tex", include.rownames = FALSE )
+
+```
+
+```{r}
+
+###########descriptive statistics 
+#counts 
+nrow(alldata[RTK==1])
+
+nrow(RTK[Reason_UB==1])/nrow(RTK)
+
+cat("ARB reason: \n")
+nrow(RTK[ARB_rfr==1])
+nrow(RTK[ARB_rfr==1])/nrow(RTK)
+
+cat("SRB reason: \n")
+nrow(RTK[SRB_rfr==1])
+nrow(RTK[SRB_rfr==1])/nrow(RTK)
+
+cat("OB reason: \n")
+nrow(RTK[OB_rfr==1])
+nrow(RTK[OB_rfr==1])/nrow(RTK)
+
+cat("number of support")
+mdata[,.N, by = c("support", "RTK")]
+
+cat("Count of ARB")
+final_table[,.N, by = c("support", "ARB_Present")]
+final_table[,.N, by = c("support", "SRB_present")]
+final_table[,.N, by = c("support", "OB_exist")]
+
+
+```
+```{r}
+###More descriptive statistic 
+#original data 
+final_table[,.N, by =c("support", "Reason_UB")]
+#number of adoptions
+length(unique(PAS1$registration_id))
+
+
+
+``` 
+
+
+
+```{r}
+
+#more descriptive statistics 
+mdata = final_table2[, (1:47) := lapply(.SD, function(x) as.numeric(as.character(x))), .SDcols = c(1:47)]
+mdata = match.data(m.out) 
+#mdata = mdata[, (1:47) := lapply(.SD, function(x) as.numeric(as.character(x))), .SDcols = c(1:47)]
+colnames(mdata)
+
+sprt_return= (mdata[support == 1 & RTK == 1, c(1:47)])
+sprt_return = colSums(sprt_return)/nrow(mdata[support == 1])*100
+
+sprt_no_return = (mdata[support == 1 & RTK == 0, c(1:47)])
+sprt_no_return = colSums(sprt_no_return)/nrow(mdata[support == 1])*100
+
+no_sprt_return = (mdata[support == 0 & RTK == 1, c(1:47)])
+no_sprt_return = colSums(no_sprt_return)/nrow(mdata[support == 0])*100
+
+no_sprt_no_return = (mdata[support == 0 & RTK == 0, c(1:47)])
+no_sprt_no_return = colSums(no_sprt_no_return)/nrow(mdata[support == 0])*100
+
+count_tbl_propor = data.frame(cbind(no_sprt_no_return, no_sprt_return, sprt_no_return, sprt_return))
+
+getname = all.vars(formula(best_glm))[4:13]
+count1 = count_tbl_propor[getname,]
+
+#write to latex 
+print(xtable(count1, digits = 2), type = "latex", file= "C:/Users/emv06/Desktop/ds/dissertation/count_balance_prop.tex")
+
+```
+
+
+```{r}
+###a data frame for all the variables 
+aggression =  paste(all_Details, collapse = ", ")
+target =  paste(all_Target, collapse = ", ")
+separation =  paste(all_values, collapse = ", ")
+variable_data = data.frame(type = c("Return type", "Treatment", "Aggression Related Behaviours", "Aggression Target","Separation Behaviours", "Demographic factors", "Other" ), variables = c("RTK, ARB_rfr, SRB_rfr", "support",  aggression, target, separation, "size, sex, kc_group, age_group", "BMP, Other Behaviour"))
+####write to latex 
+print(xtable(variable_data), 
+      include.rownames = FALSE, 
+      tabular.environment = "tabularx", 
+      width = "\\textwidth", 
+      sanitize.text.function = identity,
+      add.to.row = list(pos = list(0), command = c("\\hline\n")),
+      booktabs = TRUE,
+      file = "C:/Users/emv06/Desktop/ds/dissertation/var_tbl.tex")
+
+
+```
+
