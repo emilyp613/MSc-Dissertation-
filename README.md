@@ -3,8 +3,7 @@
 Influence of Post-Adoption Support on Return to Kennel Rate in dog rehoming centres
 
 ## Description
-
-Finding the effect of support on dog return 
+This is a Master dissertation project  
 
 ## Getting Started
 There are two files,
